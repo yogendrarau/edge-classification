@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3.11 --version)",
+      "PowerShell(py install 3.11)",
+      "Bash(py -3.11 -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell($content = \"[defaults]`npython=3.11\"; Set-Content -Path \"$env:APPDATA\\\\py.ini\" -Value $content -Encoding utf8; Write-Host \"py.ini written\")",
+      "PowerShell($env:PY_PYTHON = \"3.11\"; py --version)",
+      "PowerShell(\\(Get-Command python\\).Source; [System.Environment]::GetEnvironmentVariable\\(\"PATH\", \"User\"\\) -split \";\" | Select-String -Pattern \"python|Python\" -SimpleMatch)",
+      "PowerShell([System.Environment]::GetEnvironmentVariable\\(\"PATH\", \"Machine\"\\) -split \";\" | Select-String -Pattern \"python|Python\" -SimpleMatch -i)"
+    ]
+  }
+}
