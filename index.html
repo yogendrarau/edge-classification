@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edge MobileNetV2 — In-Browser Classifier</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d;
+    --ink: #e6edf3; --dim: #8b949e; --accent: #2f81f7; --good: #3fb950;
+    --mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--mono);
+    min-height: 100vh; padding: 40px 20px; line-height: 1.5;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 28px; }
+  h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.3px; }
+  h1 .tag { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 13px; margin-top: 6px; }
+  .status {
+    font-size: 12px; color: var(--dim); margin-bottom: 20px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .dot.ready { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 24px; margin-bottom: 20px;
+  }
+  .drop {
+    border: 1.5px dashed var(--line); border-radius: 8px; padding: 40px 20px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: rgba(47,129,247,.06); }
+  .drop p { color: var(--dim); font-size: 13px; }
+  .drop strong { color: var(--ink); }
+  #preview { max-width: 100%; max-height: 280px; border-radius: 6px; display: none; margin: 0 auto 20px; }
+  .results { display: none; }
+  .row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px;
+  }
+  .row:last-child { border-bottom: none; }
+  .row .lab { color: var(--ink); }
+  .row .pct { color: var(--accent); font-weight: 600; }
+  .row.top .lab { font-size: 15px; font-weight: 600; }
+  .row.top .pct { color: var(--good); }
+  .bar { height: 3px; background: var(--accent); border-radius: 2px; margin-top: 4px; }
+  .meta {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    margin-top: 20px; font-size: 12px;
+  }
+  .meta div { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  .meta .k { color: var(--dim); }
+  .meta .v { color: var(--ink); font-size: 16px; font-weight: 600; margin-top: 2px; }
+  .meta .v.accent { color: var(--accent); }
+  footer { color: var(--dim); font-size: 11px; text-align: center; margin-top: 32px; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>edge-classification <span class="tag">// in-browser inference</span></h1>
+    <p class="sub">MobileNetV2 (FP32, fine-tuned on Imagenette) running client-side via ONNX Runtime Web. No server, no upload — inference happens on your device.</p>
+  </header>
+
+  <div class="status">
+    <span class="dot" id="dot"></span>
+    <span id="statusText">loading model…</span>
+  </div>
+
+  <div class="panel">
+    <label class="drop" id="drop" for="file">
+      <p><strong>Drop an image</strong> or click to browse</p>
+      <p style="margin-top:6px">classes: tench · springer · cassette · chainsaw · church · french horn · garbage truck · gas pump · golf ball · parachute</p>
+    </label>
+    <input type="file" id="file" accept="image/*">
+    <img id="preview" alt="preview">
+    <div class="results" id="results"></div>
+    <div class="meta" id="meta" style="display:none">
+      <div><div class="k">backend</div><div class="v accent" id="mBackend">—</div></div>
+      <div><div class="k">inference latency</div><div class="v" id="mLatency">—</div></div>
+    </div>
+  </div>
+
+  <footer>on-device latency measured as median of 20 runs after warm-up · model ~13.6 MB</footer>
+</div>
+
+<script>
+const LABELS = ["tench","English springer","cassette player","chain saw","church",
+  "French horn","garbage truck","gas pump","golf ball","parachute"];
+// The 10 ImageNet indices this model's 1000-way head maps to (same as training).
+const IMAGENET_IDX = [0,217,482,491,497,566,569,571,574,701];
+const MEAN = [0.485,0.456,0.406], STD = [0.229,0.224,0.225];
+
+let session = null, backend = "—";
+
+async function init() {
+  // try WebGPU first, fall back to WASM — report whichever actually ran
+  try {
+    session = await ort.InferenceSession.create("./mobilenetv2_fp32.onnx",
+      { executionProviders: ["webgpu"] });
+    backend = "WebGPU";
+  } catch (e) {
+    session = await ort.InferenceSession.create("./mobilenetv2_fp32.onnx",
+      { executionProviders: ["wasm"] });
+    backend = "WASM";
+  }
+  document.getElementById("dot").classList.add("ready");
+  document.getElementById("statusText").textContent = `model ready · backend: ${backend}`;
+}
+
+function preprocess(img) {
+  // resize shorter side to 232, center-crop 224, normalize — matches eval transform
+  const S = 224, c = document.createElement("canvas");
+  c.width = S; c.height = S;
+  const ctx = c.getContext("2d");
+  const scale = 232 / Math.min(img.width, img.height);
+  const w = img.width * scale, h = img.height * scale;
+  ctx.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
+  const { data } = ctx.getImageData(0, 0, S, S);
+  const f = new Float32Array(3 * S * S);
+  for (let i = 0; i < S * S; i++) {
+    f[i]             = (data[i*4]   / 255 - MEAN[0]) / STD[0]; // R plane
+    f[i + S*S]       = (data[i*4+1] / 255 - MEAN[1]) / STD[1]; // G plane
+    f[i + 2*S*S]     = (data[i*4+2] / 255 - MEAN[2]) / STD[2]; // B plane
+  }
+  return new ort.Tensor("float32", f, [1, 3, S, S]);
+}
+
+function softmax(arr) {
+  const m = Math.max(...arr), e = arr.map(x => Math.exp(x - m));
+  const s = e.reduce((a,b)=>a+b,0);
+  return e.map(x => x / s);
+}
+
+async function classify(img) {
+  const input = preprocess(img);
+
+  // warm-up, then time the median of 20 runs — same methodology as the offline benchmark
+  await session.run({ input });
+  const times = [];
+  let logits;
+  for (let i = 0; i < 20; i++) {
+    const t = performance.now();
+    const out = await session.run({ input });
+    times.push(performance.now() - t);
+    logits = out.logits.data;
+  }
+  times.sort((a,b)=>a-b);
+  const median = times[Math.floor(times.length/2)];
+
+  // pull out the 10 Imagenette logits, softmax over just those, rank
+  const sub = IMAGENET_IDX.map(idx => logits[idx]);
+  const probs = softmax(sub);
+  const ranked = probs.map((p,i)=>({label:LABELS[i],p}))
+    .sort((a,b)=>b.p-a.p);
+
+  render(ranked, median);
+}
+
+function render(ranked, median) {
+  const r = document.getElementById("results");
+  r.style.display = "block";
+  r.innerHTML = ranked.slice(0,5).map((x,i)=>`
+    <div class="row ${i===0?'top':''}">
+      <span class="lab">${x.label}</span>
+      <span class="pct">${(x.p*100).toFixed(1)}%</span>
+    </div>
+    ${i===0?`<div class="bar" style="width:${(x.p*100).toFixed(0)}%"></div>`:''}
+  `).join("");
+  document.getElementById("meta").style.display = "grid";
+  document.getElementById("mBackend").textContent = backend;
+  document.getElementById("mLatency").textContent = median.toFixed(1) + " ms";
+}
+
+function loadImage(file) {
+  const img = new Image();
+  img.onload = () => {
+    const p = document.getElementById("preview");
+    p.src = img.src; p.style.display = "block";
+    classify(img);
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+// wiring
+const drop = document.getElementById("drop"), fileInput = document.getElementById("file");
+fileInput.addEventListener("change", e => { if (e.target.files[0]) loadImage(e.target.files[0]); });
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", e => {
+  e.preventDefault(); drop.classList.remove("over");
+  if (e.dataTransfer.files[0]) loadImage(e.dataTransfer.files[0]);
+});
+
+init().catch(err => {
+  document.getElementById("statusText").textContent = "failed to load model: " + err.message;
+});
+</script>
+</body>
+</html>
